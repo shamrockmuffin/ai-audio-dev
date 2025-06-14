@@ -1,3 +1,18 @@
+import os
+import sys
+
+# Fix PyTorch/Streamlit compatibility issue
+# This prevents the torch.classes module inspection error
+os.environ['STREAMLIT_SERVER_FILE_WATCHER_TYPE'] = 'none'
+os.environ['STREAMLIT_BROWSER_GATHER_USAGE_STATS'] = 'false'
+
+# Prevent torch from being inspected by Streamlit's file watcher
+if 'torch' not in sys.modules:
+    import torch
+    # Monkey patch to prevent the __path__._path issue
+    if hasattr(torch, '_classes'):
+        torch._classes.__path__ = []
+
 import streamlit as st
 import asyncio
 from pathlib import Path
@@ -53,7 +68,7 @@ logging.basicConfig(
     format='%(asctime)s [%(levelname)s] %(message)s'
 )
 
-# Page configuration
+# Configure Streamlit to handle large data
 st.set_page_config(
     page_title="Audio Analysis & Transcription",
     page_icon="🎵",
@@ -306,7 +321,7 @@ class AudioAnalyzerApp:
         
         with col1:
             st.subheader("📊 Waveform")
-            render_waveform(state.current_file)
+            render_waveform(state.current_file, key="waveform_original")
         
         with col2:
             st.subheader("🌈 Spectrogram")
@@ -343,48 +358,39 @@ class AudioAnalyzerApp:
             with col1:
                 st.subheader("Original Audio")
                 render_audio_player(state.current_file)
-                render_waveform(state.current_file)
+                render_waveform(state.current_file, key="waveform_original")
             
             with col2:
                 st.subheader("Enhanced Audio")
                 render_audio_player(state.enhanced_file)
-                render_waveform(state.enhanced_file)
+                render_waveform(state.enhanced_file, key="waveform_enhanced")
     
     async def _render_transcription_tab(self, state):
         """Render transcription tab"""
         st.header("Audio Transcription")
-        
-        # Transcription options
-        col1, col2 = st.columns(2)
-        
+        col1, col2, col3 = st.columns(3)
         with col1:
             if st.button("📝 Transcribe Audio", type="primary", use_container_width=True):
                 await self._transcribe_audio(state)
-        
         with col2:
             if st.button("👥 Transcribe with Speakers", type="secondary", use_container_width=True):
                 await self._transcribe_with_speakers(state)
-        
+        with col3:
+            if st.button("✨ Enhance Transcription", type="primary", use_container_width=True):
+                await self._enhance_transcription(state)
         if state.transcription:
-            # Show speaker analysis if available
             if 'speaker_analysis' in state.transcription:
                 self._render_speaker_analysis(state.transcription['speaker_analysis'])
                 st.divider()
-            
             render_transcription_view(state.transcription)
-            
-            # Export options
             st.divider()
             col1, col2, col3 = st.columns(3)
-            
             with col1:
                 if st.button("📄 Export as TXT"):
                     self._export_transcription(state, 'txt')
-            
             with col2:
                 if st.button("📊 Export as JSON"):
                     self._export_transcription(state, 'json')
-            
             with col3:
                 if st.button("📑 Export as SRT"):
                     self._export_transcription(state, 'srt')
@@ -559,79 +565,63 @@ class AudioAnalyzerApp:
             st.warning(f"⚠️ {metrics.clip_count} clipped samples detected")
     
     async def _transcribe_audio(self, state):
-        """Transcribe audio with progress tracking"""
+        """Transcribe audio with progress tracking (Whisper only)"""
         progress_bar = st.progress(0)
         status = st.empty()
-        
         try:
-            # Use enhanced audio if available
             audio_file = state.enhanced_file or state.current_file
-            
             status.text("🎤 Transcribing audio...")
             progress_bar.progress(0.3)
-            
-            # Get transcription
             result = await self.transcription_handler.transcribe(
-                audio_file,
-                enhance=state.settings.get('enhance_transcription', True)
+                audio_file
             )
-            
             progress_bar.progress(0.7)
-            
-            # Enhance with Claude if enabled
-            if state.settings.get('enhance_transcription', True):
-                status.text("✨ Enhancing transcription with AI...")
-                result['enhanced_text'] = await self.claude_service.enhance_transcription(
-                    result['text']
-                )
-            
             state.transcription = result
             progress_bar.progress(1.0)
             status.success("✅ Transcription complete!")
-            
         except Exception as e:
             status.error(f"❌ Error: {str(e)}")
             logging.error(f"Transcription error: {e}")
-    
+
     async def _transcribe_with_speakers(self, state):
         """Transcribe audio with speaker diarization"""
         progress_bar = st.progress(0)
         status = st.empty()
-        
         try:
-            # Use enhanced audio if available
             audio_file = state.enhanced_file or state.current_file
-            
             status.text("🎤 Transcribing with speaker diarization...")
             progress_bar.progress(0.2)
-            
             status.text("👥 Analyzing speakers with PyAnnote...")
             progress_bar.progress(0.5)
-            
-            # Get diarized transcription
             result = await self.transcription_handler.transcribe_with_speaker_diarization(
                 audio_file
             )
-            
             progress_bar.progress(0.8)
-            
-            # Enhance with Claude if enabled
-            if state.settings.get('enhance_transcription', True) and 'enhanced_text' not in result:
-                status.text("✨ Enhancing transcription with AI...")
-                result['enhanced_text'] = await self.claude_service.enhance_transcription(
-                    result['text']
-                )
-            
             state.transcription = result
             progress_bar.progress(1.0)
-            
-            # Show success with speaker count
             speaker_count = result.get('speaker_analysis', {}).get('total_speakers', 0)
             status.success(f"✅ Transcription complete! Detected {speaker_count} speaker(s)")
-            
         except Exception as e:
             status.error(f"❌ Error: {str(e)}")
             logging.error(f"Speaker diarization error: {e}")
+
+    async def _enhance_transcription(self, state):
+        """Enhance transcription with Claude (explicit action)"""
+        if not state.transcription or not state.transcription.get('text'):
+            st.warning("No transcription available to enhance.")
+            return
+        status = st.empty()
+        try:
+            status.text("✨ Enhancing transcription with AI...")
+            enhanced_text = await self.claude_service.enhance_transcription(
+                state.transcription['text']
+            )
+            state.transcription['enhanced_text'] = enhanced_text
+            state.transcription['enhanced_word_count'] = len(enhanced_text.split())
+            status.success("✅ Enhancement complete!")
+        except Exception as e:
+            status.error(f"❌ Enhancement error: {str(e)}")
+            logging.error(f"Enhancement error: {e}")
     
     def _render_speaker_analysis(self, speaker_analysis: Dict):
         """Render speaker analysis results"""

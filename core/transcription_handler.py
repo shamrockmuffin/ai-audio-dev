@@ -24,31 +24,18 @@ class TranscriptionHandler:
         self,
         audio_path: str,
         language: Optional[str] = None,
-        enhance: bool = True,
         return_segments: bool = True
     ) -> Dict:
         """
-        Complete transcription pipeline
-        
-        Args:
-            audio_path: Path to audio file
-            language: Optional language code
-            enhance: Whether to enhance with Claude
-            return_segments: Whether to return timestamped segments
-            
-        Returns:
-            Dictionary with transcription results
+        Complete transcription pipeline (Whisper only)
         """
         try:
             logger.info(f"Starting transcription for: {audio_path}")
-            
-            # Get raw transcription from Whisper
             whisper_result = await self.whisper_service.transcribe_audio(
                 audio_path,
                 language=language,
                 return_timestamps=return_segments
             )
-            
             result = {
                 'text': whisper_result['text'],
                 'segments': whisper_result.get('segments', []),
@@ -57,21 +44,8 @@ class TranscriptionHandler:
                 'confidence': whisper_result.get('confidence', 0),
                 'word_count': whisper_result.get('word_count', 0)
             }
-            
-            # Enhance if requested
-            if enhance and result['text']:
-                logger.info("Enhancing transcription with Claude")
-                
-                enhanced_text = await self.claude_service.enhance_transcription(
-                    result['text']
-                )
-                
-                result['enhanced_text'] = enhanced_text
-                result['enhanced_word_count'] = len(enhanced_text.split())
-            
             logger.info("Transcription completed successfully")
             return result
-            
         except Exception as e:
             logger.error(f"Transcription error: {e}")
             raise
@@ -95,7 +69,7 @@ class TranscriptionHandler:
             logger.info(f"Starting diarized transcription for: {audio_path}")
             
             # Get basic transcription
-            transcription_result = await self.transcribe(audio_path, enhance=True)
+            transcription_result = await self.transcribe(audio_path, return_segments=True)
             
             # Get speaker diarization
             speaker_analysis = await self.pyannote_service.analyze_speakers(audio_path)
@@ -124,7 +98,7 @@ class TranscriptionHandler:
         except Exception as e:
             logger.error(f"Diarized transcription error: {e}")
             # Fallback to regular transcription
-            return await self.transcribe(audio_path, enhance=True)
+            return await self.transcribe(audio_path, return_segments=True)
     
     def _align_transcription_with_speakers(
         self, 

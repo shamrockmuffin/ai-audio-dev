@@ -173,7 +173,7 @@ class PyAnnoteService:
                 try:
                     self.vad_pipeline = VoiceActivityDetection(segmentation=self.segmentation_model)
                     # Use default hyperparameters for PyAnnote 3.0
-                    self.vad_pipeline.instantiate()
+                    self.vad_pipeline.instantiate({})
                     logger.info("✓ Initialized VAD pipeline with segmentation model")
                 except Exception as vad_error:
                     logger.warning(f"VAD pipeline initialization failed: {vad_error}")
@@ -183,7 +183,7 @@ class PyAnnoteService:
                 try:
                     self.overlap_detection_pipeline = OverlappedSpeechDetection(segmentation=self.segmentation_model)
                     # Use default hyperparameters for PyAnnote 3.0
-                    self.overlap_detection_pipeline.instantiate()
+                    self.overlap_detection_pipeline.instantiate({})
                     logger.info("✓ Initialized overlap detection pipeline")
                 except Exception as overlap_error:
                     logger.warning(f"Overlap detection pipeline initialization failed: {overlap_error}")

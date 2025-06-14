@@ -32,22 +32,31 @@ def render_audio_player(file_path: str, key: Optional[str] = None):
         st.error(f"Error loading audio: {str(e)}")
         logger.error(f"Audio player error: {e}")
 
-def render_waveform(file_path: str, figsize: tuple = (12, 4)):
-    """Render waveform visualization"""
+def render_waveform(file_path: str, figsize: tuple = (12, 4), max_points: int = 10000):
+    """Render waveform visualization with data sampling to prevent large transfers"""
     try:
         # Load audio
         y, sr = librosa.load(file_path, sr=None)
         duration = len(y) / sr
         
-        # Create plotly figure
-        time = np.linspace(0, duration, len(y))
+        # Sample data if too large to prevent Streamlit message size limit
+        if len(y) > max_points:
+            # Use decimation to reduce data points while preserving shape
+            step = len(y) // max_points
+            y_sampled = y[::step]
+            time_sampled = np.linspace(0, duration, len(y_sampled))
+            st.info(f"📊 Displaying sampled waveform ({len(y_sampled):,} of {len(y):,} points) to optimize performance")
+        else:
+            y_sampled = y
+            time_sampled = np.linspace(0, duration, len(y))
         
+        # Create plotly figure
         fig = go.Figure()
         
         # Add waveform trace
         fig.add_trace(go.Scatter(
-            x=time,
-            y=y,
+            x=time_sampled,
+            y=y_sampled,
             mode='lines',
             name='Waveform',
             line=dict(color='#3b82f6', width=1),
@@ -71,20 +80,25 @@ def render_waveform(file_path: str, figsize: tuple = (12, 4)):
         fig.update_xaxes(showgrid=True, gridwidth=1, gridcolor='rgba(128,128,128,0.2)')
         fig.update_yaxes(showgrid=True, gridwidth=1, gridcolor='rgba(128,128,128,0.2)')
         
-        st.plotly_chart(fig, use_container_width=True)
+        sanitized_path = file_path.replace('/', '_').replace('\\', '_').replace('\\', '_')
+        st.plotly_chart(fig, use_container_width=True, key=f"waveform_{sanitized_path}")
         
     except Exception as e:
         st.error(f"Error rendering waveform: {str(e)}")
         logger.error(f"Waveform error: {e}")
 
-def render_spectrogram(file_path: str, figsize: tuple = (12, 4)):
-    """Render spectrogram visualization"""
+def render_spectrogram(file_path: str, figsize: tuple = (12, 4), max_duration: float = 60.0):
+    """Render spectrogram visualization with duration limiting to prevent large transfers"""
     try:
-        # Load audio
-        y, sr = librosa.load(file_path, sr=None)
+        # Load audio with duration limit to prevent memory issues
+        y, sr = librosa.load(file_path, sr=None, duration=max_duration)
         
-        # Compute spectrogram
-        D = librosa.stft(y)
+        if len(y) / sr > max_duration:
+            st.info(f"📊 Displaying first {max_duration} seconds of audio for spectrogram to optimize performance")
+        
+        # Compute spectrogram with reduced resolution for large files
+        hop_length = 512 if len(y) < sr * 30 else 1024  # Reduce resolution for long files
+        D = librosa.stft(y, hop_length=hop_length)
         S_db = librosa.amplitude_to_db(np.abs(D), ref=np.max)
         
         # Create figure

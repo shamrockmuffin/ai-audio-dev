@@ -1,0 +1,24 @@
+[server]
+# Increase message size limit to handle large audio data
+maxMessageSize = 1000
+
+# Disable file watcher to prevent PyTorch compatibility issues
+fileWatcherType = "none"
+
+# Optimize for large data handling
+maxUploadSize = 1000
+
+[browser]
+# Disable usage stats collection
+gatherUsageStats = false
+
+[theme]
+# Optional: Set a nice theme
+primaryColor = "#FF6B6B"
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F0F2F6"
+textColor = "#262730"
+
+[client]
+# Show error details for debugging
+showErrorDetails = true 

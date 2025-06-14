@@ -68,9 +68,9 @@ class WhisperService:
             
             self.model = WhisperForConditionalGeneration.from_pretrained(
                 self.model_name,
-                torch_dtype=dtype
+                torch_dtype=dtype,
+                device_map="auto" if self.device.startswith("cuda") else None
             )
-            self.model.to(self.device)
             
             # Enable GPU optimizations if using CUDA
             if self.device.startswith("cuda"):

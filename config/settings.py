@@ -29,7 +29,7 @@ class Settings(BaseSettings):
     )
     
     CLAUDE_MODEL: str = Field(
-        default="claude-3-5-sonnet-20241022",
+        default="claude-3-5-sonnet-latest",
         description="Claude model for text enhancement"
     )
     
