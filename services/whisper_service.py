@@ -1,6 +1,4 @@
 import torch
-import torchaudio
-from transformers import WhisperProcessor, WhisperForConditionalGeneration
 import numpy as np
 from typing import Dict, List, Optional, Tuple
 import logging
@@ -8,23 +6,81 @@ import asyncio
 from pathlib import Path
 from config.settings import settings
 
+# Import torchaudio and transformers with error handling
+try:
+    import torchaudio
+except ImportError as e:
+    logging.error(f"Failed to import torchaudio: {e}")
+    torchaudio = None
+
+try:
+    # Import transformers components separately to avoid circular imports
+    from transformers import WhisperProcessor, WhisperForConditionalGeneration
+except ImportError as e:
+    logging.error(f"Failed to import transformers: {e}")
+    WhisperProcessor = None
+    WhisperForConditionalGeneration = None
+
 class WhisperService:
     """Service for audio transcription using Whisper"""
     
     def __init__(self, model_name: str = None):
         self.logger = logging.getLogger(__name__)
         self.model_name = model_name or settings.WHISPER_MODEL
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.device = self._get_best_device()
+        
+        # Check if required dependencies are available
+        if WhisperProcessor is None or WhisperForConditionalGeneration is None:
+            raise ImportError("Transformers library not properly installed. Please reinstall with: pip install transformers")
+        if torchaudio is None:
+            raise ImportError("Torchaudio not properly installed. Please reinstall with: pip install torchaudio")
+            
         self._load_model()
+    
+    def _get_best_device(self):
+        """Get the best available device for processing"""
+        if torch.cuda.is_available() and settings.ENABLE_GPU:
+            # Use the specified GPU device
+            device_id = settings.GPU_DEVICE_ID
+            if device_id < torch.cuda.device_count():
+                device = f"cuda:{device_id}"
+                gpu_name = torch.cuda.get_device_name(device_id)
+                self.logger.info(f"CUDA available. Using GPU {device_id}: {gpu_name}")
+                return device
+            else:
+                self.logger.warning(f"GPU device {device_id} not available. Using CPU.")
+                return "cpu"
+        else:
+            if not torch.cuda.is_available():
+                self.logger.warning("CUDA not available. Using CPU.")
+            else:
+                self.logger.info("GPU disabled in settings. Using CPU.")
+            return "cpu"
     
     def _load_model(self):
         """Load Whisper model and processor"""
         try:
             self.logger.info(f"Loading Whisper model: {self.model_name}")
             self.processor = WhisperProcessor.from_pretrained(self.model_name)
-            self.model = WhisperForConditionalGeneration.from_pretrained(self.model_name)
+            # Determine dtype based on device and settings
+            use_fp16 = self.device.startswith("cuda") and settings.USE_FP16
+            dtype = torch.float16 if use_fp16 else torch.float32
+            
+            self.model = WhisperForConditionalGeneration.from_pretrained(
+                self.model_name,
+                torch_dtype=dtype
+            )
             self.model.to(self.device)
-            self.logger.info(f"Model loaded on {self.device}")
+            
+            # Enable GPU optimizations if using CUDA
+            if self.device.startswith("cuda"):
+                if settings.USE_FP16:
+                    self.model.half()  # Use FP16 for faster inference
+                torch.cuda.empty_cache()  # Clear GPU cache
+                self.logger.info(f"Model loaded on {self.device} with {'FP16' if settings.USE_FP16 else 'FP32'} precision")
+            else:
+                self.logger.info(f"Model loaded on {self.device}")
+                
         except Exception as e:
             self.logger.error(f"Error loading Whisper model: {e}")
             raise
@@ -184,6 +240,10 @@ class WhisperService:
             sampling_rate=sample_rate,
             return_tensors="pt"
         ).input_features.to(self.device)
+        
+        # Ensure input features match model precision
+        if self.device.startswith("cuda") and settings.USE_FP16:
+            input_features = input_features.half()
         
         # Generate transcription
         with torch.no_grad():

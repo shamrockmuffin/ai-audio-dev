@@ -189,7 +189,10 @@ def render_enhancement_controls(state):
                 )
 
 def render_transcription_view(transcription: Dict):
-    """Render transcription results"""
+    """Render transcription results with speaker diarization support"""
+    # Check if this is a diarized transcription
+    has_speakers = 'diarized_segments' in transcription and transcription['diarized_segments']
+    
     # Show enhanced transcription if available
     if 'enhanced_text' in transcription:
         st.subheader("✨ Enhanced Transcription")
@@ -235,8 +238,97 @@ def render_transcription_view(transcription: Dict):
             if 'word_count' in transcription:
                 st.metric("Word Count", transcription['word_count'])
     
-    # Show segments if available
-    if 'segments' in transcription and transcription['segments']:
+    # Show diarized segments if available
+    if has_speakers:
+        st.subheader("👥 Speaker-Separated Transcription")
+        
+        # Create speaker color mapping
+        speakers = set(seg.get('speaker_id', 'UNKNOWN') for seg in transcription['diarized_segments'])
+        speaker_colors = {
+            speaker: color for speaker, color in zip(
+                speakers, 
+                ['#3b82f6', '#ef4444', '#10b981', '#f59e0b', '#8b5cf6', '#06b6d4']
+            )
+        }
+        
+        # Display segments with speaker colors
+        for i, segment in enumerate(transcription['diarized_segments']):
+            speaker_id = segment.get('speaker_id', 'UNKNOWN')
+            speaker_gender = segment.get('speaker_gender', 'unknown')
+            speaker_confidence = segment.get('speaker_confidence', 0)
+            text = segment.get('text', '')
+            start_time = segment.get('start', 0)
+            end_time = segment.get('end', 0)
+            
+            # Get speaker color
+            color = speaker_colors.get(speaker_id, '#6b7280')
+            
+            # Create speaker badge
+            gender_emoji = "👨" if speaker_gender == 'male' else "👩" if speaker_gender == 'female' else "👤"
+            
+            st.markdown(
+                f"""
+                <div style="
+                    background-color: {color}15;
+                    border-left: 4px solid {color};
+                    padding: 1rem;
+                    border-radius: 0.5rem;
+                    margin: 0.5rem 0;
+                ">
+                    <div style="
+                        display: flex;
+                        justify-content: space-between;
+                        align-items: center;
+                        margin-bottom: 0.5rem;
+                    ">
+                        <span style="
+                            background-color: {color};
+                            color: white;
+                            padding: 0.25rem 0.75rem;
+                            border-radius: 1rem;
+                            font-size: 0.875rem;
+                            font-weight: 600;
+                        ">
+                            {gender_emoji} {speaker_id}
+                        </span>
+                        <span style="
+                            color: #6b7280;
+                            font-size: 0.875rem;
+                        ">
+                            {start_time:.1f}s - {end_time:.1f}s
+                            {f" (confidence: {speaker_confidence:.1%})" if speaker_confidence > 0 else ""}
+                        </span>
+                    </div>
+                    <div style="font-size: 1rem; line-height: 1.5;">
+                        {text}
+                    </div>
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
+        
+        # Show speaker legend
+        with st.expander("🎨 Speaker Legend"):
+            for speaker_id in speakers:
+                color = speaker_colors.get(speaker_id, '#6b7280')
+                st.markdown(
+                    f"""
+                    <div style="display: flex; align-items: center; margin: 0.25rem 0;">
+                        <div style="
+                            width: 20px;
+                            height: 20px;
+                            background-color: {color};
+                            border-radius: 50%;
+                            margin-right: 0.5rem;
+                        "></div>
+                        <span>{speaker_id}</span>
+                    </div>
+                    """,
+                    unsafe_allow_html=True
+                )
+    
+    # Show regular segments if no diarization
+    elif 'segments' in transcription and transcription['segments']:
         with st.expander("🎯 Show Timestamped Segments"):
             for i, segment in enumerate(transcription['segments']):
                 st.markdown(

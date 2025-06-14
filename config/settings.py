@@ -17,6 +17,11 @@ class Settings(BaseSettings):
         description="Anthropic API key for Claude"
     )
     
+    HUGGING_FACE_TOKEN: str = Field(
+        default=os.getenv("HUGGING_FACE_TOKEN", ""),
+        description="Hugging Face token for accessing gated models"
+    )
+    
     # Model configurations
     WHISPER_MODEL: str = Field(
         default="openai/whisper-base",
@@ -24,7 +29,7 @@ class Settings(BaseSettings):
     )
     
     CLAUDE_MODEL: str = Field(
-        default="claude-3-sonnet-20240229",
+        default="claude-3-5-sonnet-20241022",
         description="Claude model for text enhancement"
     )
     
@@ -91,6 +96,16 @@ class Settings(BaseSettings):
     ENABLE_GPU: bool = Field(
         default=True,
         description="Enable GPU acceleration if available"
+    )
+    
+    GPU_DEVICE_ID: int = Field(
+        default=0,
+        description="GPU device ID to use (0 for RTX 4070, 1 for RTX 3060)"
+    )
+    
+    USE_FP16: bool = Field(
+        default=False,
+        description="Use FP16 precision for faster GPU inference (disabled by default to avoid precision issues)"
     )
     
     @validator('ANTHROPIC_API_KEY')

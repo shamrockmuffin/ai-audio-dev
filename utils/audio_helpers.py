@@ -97,12 +97,19 @@ def save_audio_file(
         # Full path
         file_path = output_dir / filename
         
-        # Save audio
+        # Ensure audio data is in correct format for saving
+        if len(audio_data.shape) > 1:
+            # If stereo, transpose to (samples, channels) format
+            if audio_data.shape[0] == 2:
+                audio_data = audio_data.T
+        
+        # Save audio with proper format
         sf.write(
             file_path,
             audio_data,
             sample_rate,
-            subtype='PCM_16'  # 16-bit PCM
+            subtype='PCM_16',  # 16-bit PCM
+            format='WAV'       # Explicitly specify WAV format
         )
         
         logger.info(f"Audio saved to: {file_path}")

@@ -6,11 +6,36 @@ import os
 import logging
 from datetime import datetime
 import json
+import shutil
+import numpy as np
+from typing import Dict, Any
 
-from config.settings import settings
-from core.audio_processor import AudioProcessor
-from core.transcription_handler import TranscriptionHandler
-from services.claude_service import ClaudeService
+# Handle potential import issues
+try:
+    from config.settings import settings
+    from core.professional_audio_processor import ProfessionalAudioProcessor, AudioMetrics
+    from core.transcription_handler import TranscriptionHandler
+    from core.security.audio_security import AudioFileValidator
+    from services.claude_service import ClaudeService
+except ImportError as e:
+    st.error(f"""
+    **Import Error Detected**: {str(e)}
+    
+    This is likely due to a PyTorch/torchvision dependency conflict. 
+    
+    **To fix this issue:**
+    1. Run the diagnostic script: `python fix_pytorch_deps.py`
+    2. Or manually reinstall PyTorch ecosystem:
+       ```
+       .conda\\Scripts\\pip.exe uninstall torch torchvision torchaudio -y
+       .conda\\Scripts\\pip.exe install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
+       .conda\\Scripts\\pip.exe install --upgrade transformers
+       ```
+    3. Restart the application
+    
+    **Current Error**: {str(e)}
+    """)
+    st.stop()
 from ui.components import (
     render_audio_player,
     render_waveform,
@@ -20,6 +45,7 @@ from ui.components import (
 )
 from ui.session_state import SessionStateManager
 from utils.audio_helpers import save_audio_file, get_audio_metadata
+from utils.cache_manager import cache_manager
 
 # Configure logging
 logging.basicConfig(
@@ -75,7 +101,11 @@ st.markdown("""
 class AudioAnalyzerApp:
     def __init__(self):
         self.session_manager = SessionStateManager()
-        self.audio_processor = AudioProcessor()
+        self.audio_processor = ProfessionalAudioProcessor(
+            target_sample_rate=48000,
+            max_true_peak=-1.0,    # EBU R128 standard
+            target_lufs=-16.0      # Streaming standard
+        )
         self.transcription_handler = TranscriptionHandler()
         self.claude_service = ClaudeService()
         
@@ -137,6 +167,33 @@ class AudioAnalyzerApp:
                 "AI Transcription Enhancement", 
                 value=state.settings.get('enhance_transcription', True)
             )
+            
+            state.settings['speaker_diarization'] = st.checkbox(
+                "Speaker Diarization (PyAnnote)", 
+                value=state.settings.get('speaker_diarization', False),
+                help="Identify and separate different speakers using PyAnnote.audio"
+            )
+            
+            # Cache management
+            st.divider()
+            st.subheader("💾 Cache Management")
+            
+            cache_stats = cache_manager.get_cache_stats()
+            st.metric("Cache Size", f"{cache_stats['total_size_mb']:.1f} MB")
+            st.metric("Cached Files", cache_stats['total_files'])
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.button("🗑️ Clear Cache"):
+                    cache_manager.clear_cache()
+                    st.success("Cache cleared!")
+                    st.rerun()
+            
+            with col2:
+                if st.button("📊 Cache Stats"):
+                    with st.expander("Cache Details", expanded=True):
+                        for cache_type, stats in cache_stats['by_type'].items():
+                            st.write(f"**{cache_type.title()}**: {stats['files']} files, {stats['size_mb']:.1f} MB")
         
         # Main content area
         if state.current_file:
@@ -145,22 +202,56 @@ class AudioAnalyzerApp:
             self._render_welcome_screen()
     
     async def _handle_file_upload(self, uploaded_file) -> str:
-        """Handle file upload and return saved file path"""
+        """Handle file upload with security validation"""
         try:
-            # Create temp directory if it doesn't exist
-            temp_dir = Path(tempfile.gettempdir()) / "audio_analyzer"
-            temp_dir.mkdir(exist_ok=True)
+            # Initialize security components
+            validator = AudioFileValidator(
+                max_file_size_mb=settings.MAX_FILE_SIZE_MB,
+                allowed_formats=['wav', 'mp3', 'flac', 'ogg', 'm4a'],
+                enable_deep_scan=True
+            )
             
-            # Save file with timestamp
+            # Create temporary file
+            with tempfile.NamedTemporaryFile(delete=False) as tmp:
+                tmp.write(uploaded_file.getbuffer())
+                tmp_path = tmp.name
+            
+            # Validate file
+            validation = await validator.validate_file(
+                tmp_path,
+                original_filename=uploaded_file.name
+            )
+            
+            if not validation.is_safe:
+                os.unlink(tmp_path)  # Clean up
+                st.error(f"Security validation failed: {', '.join(validation.issues)}")
+                return None
+            
+            # Move to secure storage
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            file_extension = Path(uploaded_file.name).suffix
-            file_path = temp_dir / f"{timestamp}_{uploaded_file.name}"
+            safe_filename = f"{timestamp}_{validation.hash_sha256[:8]}.{validation.file_type}"
+            final_path = settings.TEMP_DIR / safe_filename
             
-            # Write file
-            with open(file_path, "wb") as f:
-                f.write(uploaded_file.getbuffer())
+            # Ensure temp directory exists
+            settings.TEMP_DIR.mkdir(parents=True, exist_ok=True)
             
-            return str(file_path)
+            shutil.move(tmp_path, final_path)
+            os.chmod(final_path, 0o644)  # Set appropriate permissions
+            
+            # Display validation info
+            st.success(f"✅ File validated successfully")
+            with st.expander("📋 File Validation Details"):
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.metric("File Size", f"{validation.file_size / 1024 / 1024:.1f} MB")
+                    st.metric("File Type", validation.file_type.upper())
+                with col2:
+                    if validation.duration:
+                        st.metric("Duration", f"{validation.duration:.1f}s")
+                    if validation.sample_rate:
+                        st.metric("Sample Rate", f"{validation.sample_rate} Hz")
+            
+            return str(final_path)
             
         except Exception as e:
             st.error(f"Error uploading file: {str(e)}")
@@ -263,10 +354,23 @@ class AudioAnalyzerApp:
         """Render transcription tab"""
         st.header("Audio Transcription")
         
-        if st.button("📝 Transcribe Audio", type="primary", use_container_width=True):
-            await self._transcribe_audio(state)
+        # Transcription options
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            if st.button("📝 Transcribe Audio", type="primary", use_container_width=True):
+                await self._transcribe_audio(state)
+        
+        with col2:
+            if st.button("👥 Transcribe with Speakers", type="secondary", use_container_width=True):
+                await self._transcribe_with_speakers(state)
         
         if state.transcription:
+            # Show speaker analysis if available
+            if 'speaker_analysis' in state.transcription:
+                self._render_speaker_analysis(state.transcription['speaker_analysis'])
+                st.divider()
+            
             render_transcription_view(state.transcription)
             
             # Export options
@@ -313,29 +417,85 @@ class AudioAnalyzerApp:
             state.chat_history.append({"role": "assistant", "content": response})
     
     async def _enhance_audio(self, state):
-        """Process audio enhancement"""
+        """Process audio enhancement with streaming and caching"""
         progress_bar = st.progress(0)
         status = st.empty()
         
         try:
             status.text("🔄 Processing audio...")
             
-            # Process audio
-            result = await self.audio_processor.process_audio_file(
-                state.current_file,
-                settings=state.settings,
-                progress_callback=lambda p: progress_bar.progress(p)
+            # Check cache first
+            cache_key = cache_manager.get_cache_key(state.current_file, state.settings)
+            if cache_key:
+                cached_result = cache_manager.get_cached_result(cache_key, "audio")
+                if cached_result:
+                    state.enhanced_file = cached_result['enhanced_file']
+                    state.audio_metrics = cached_result['metrics']
+                    progress_bar.progress(1.0)
+                    status.success("✅ Audio loaded from cache!")
+                    self._display_professional_metrics(state.audio_metrics)
+                    return
+            
+            # Check file size for streaming decision
+            file_size = os.path.getsize(state.current_file)
+            use_streaming = file_size > 50 * 1024 * 1024  # 50MB
+            
+            if use_streaming:
+                status.text("🔄 Processing large file with streaming...")
+                # Stream process large files
+                processed_chunks = []
+                chunk_count = 0
+                
+                async for chunk in self.audio_processor.process_audio_file_streaming(
+                    state.current_file,
+                    chunk_size=1024*1024,  # 1MB chunks
+                    settings=state.settings,
+                    overlap=2048
+                ):
+                    processed_chunks.append(chunk)
+                    chunk_count += 1
+                    progress_bar.progress(min(chunk_count * 0.1, 0.9))
+                
+                # Combine chunks
+                enhanced_audio = np.concatenate(processed_chunks, axis=1)
+                sample_rate = self.audio_processor.target_sample_rate
+                
+            else:
+                # Process normally for smaller files
+                result = await self.audio_processor.process_audio_file(
+                    state.current_file,
+                    settings=state.settings,
+                    progress_callback=lambda p: progress_bar.progress(p * 0.9)
+                )
+                enhanced_audio = result.enhanced_audio
+                sample_rate = result.sample_rate
+            
+            # Calculate and display professional metrics
+            metrics = self.audio_processor.calculate_professional_metrics(
+                enhanced_audio,
+                sample_rate
             )
             
             # Save enhanced audio
             enhanced_path = save_audio_file(
-                result.enhanced_audio,
-                result.sample_rate,
+                enhanced_audio,
+                sample_rate,
                 f"enhanced_{Path(state.current_file).name}"
             )
             
             state.enhanced_file = enhanced_path
-            state.enhancement_result = result
+            state.audio_metrics = metrics
+            
+            # Cache result
+            if cache_key:
+                cache_result = {
+                    'enhanced_file': enhanced_path,
+                    'metrics': metrics
+                }
+                cache_manager.cache_result(cache_key, cache_result, "audio")
+            
+            # Display metrics
+            self._display_professional_metrics(metrics)
             
             progress_bar.progress(1.0)
             status.success("✅ Audio enhancement complete!")
@@ -343,6 +503,60 @@ class AudioAnalyzerApp:
         except Exception as e:
             status.error(f"❌ Error: {str(e)}")
             logging.error(f"Enhancement error: {e}")
+    
+    def _display_professional_metrics(self, metrics: AudioMetrics):
+        """Display professional audio metrics"""
+        st.subheader("📊 Professional Audio Metrics")
+        
+        col1, col2, col3, col4 = st.columns(4)
+        
+        with col1:
+            st.metric(
+                "LUFS Integrated", 
+                f"{metrics.lufs_integrated:.1f}",
+                help="Integrated loudness (EBU R128)"
+            )
+        
+        with col2:
+            st.metric(
+                "True Peak", 
+                f"{metrics.true_peak:.1f} dBTP",
+                delta=f"{metrics.true_peak - self.audio_processor.max_true_peak:.1f}",
+                help="True peak level with oversampling"
+            )
+        
+        with col3:
+            st.metric(
+                "Dynamic Range", 
+                f"{metrics.dynamic_range:.1f} dB",
+                help="Difference between loud and quiet parts"
+            )
+        
+        with col4:
+            st.metric(
+                "Phase Coherence", 
+                f"{metrics.phase_coherence:.2%}",
+                help="Phase stability (higher is better)"
+            )
+        
+        # Additional metrics in expandable section
+        with st.expander("🔍 Detailed Metrics"):
+            col1, col2, col3 = st.columns(3)
+            
+            with col1:
+                st.metric("Peak Amplitude", f"{metrics.peak_amplitude:.3f}")
+                st.metric("RMS Level", f"{metrics.rms_level:.3f}")
+            
+            with col2:
+                st.metric("Crest Factor", f"{metrics.crest_factor:.1f} dB")
+                st.metric("Stereo Width", f"{metrics.stereo_width:.2f}")
+            
+            with col3:
+                st.metric("Clip Count", f"{metrics.clip_count}")
+                st.metric("THD+N", f"{metrics.thd_plus_n:.3%}")
+        
+        if metrics.clip_count > 0:
+            st.warning(f"⚠️ {metrics.clip_count} clipped samples detected")
     
     async def _transcribe_audio(self, state):
         """Transcribe audio with progress tracking"""
@@ -378,6 +592,108 @@ class AudioAnalyzerApp:
         except Exception as e:
             status.error(f"❌ Error: {str(e)}")
             logging.error(f"Transcription error: {e}")
+    
+    async def _transcribe_with_speakers(self, state):
+        """Transcribe audio with speaker diarization"""
+        progress_bar = st.progress(0)
+        status = st.empty()
+        
+        try:
+            # Use enhanced audio if available
+            audio_file = state.enhanced_file or state.current_file
+            
+            status.text("🎤 Transcribing with speaker diarization...")
+            progress_bar.progress(0.2)
+            
+            status.text("👥 Analyzing speakers with PyAnnote...")
+            progress_bar.progress(0.5)
+            
+            # Get diarized transcription
+            result = await self.transcription_handler.transcribe_with_speaker_diarization(
+                audio_file
+            )
+            
+            progress_bar.progress(0.8)
+            
+            # Enhance with Claude if enabled
+            if state.settings.get('enhance_transcription', True) and 'enhanced_text' not in result:
+                status.text("✨ Enhancing transcription with AI...")
+                result['enhanced_text'] = await self.claude_service.enhance_transcription(
+                    result['text']
+                )
+            
+            state.transcription = result
+            progress_bar.progress(1.0)
+            
+            # Show success with speaker count
+            speaker_count = result.get('speaker_analysis', {}).get('total_speakers', 0)
+            status.success(f"✅ Transcription complete! Detected {speaker_count} speaker(s)")
+            
+        except Exception as e:
+            status.error(f"❌ Error: {str(e)}")
+            logging.error(f"Speaker diarization error: {e}")
+    
+    def _render_speaker_analysis(self, speaker_analysis: Dict):
+        """Render speaker analysis results"""
+        st.subheader("👥 Speaker Analysis")
+        
+        # Overview metrics
+        col1, col2, col3, col4 = st.columns(4)
+        
+        with col1:
+            st.metric(
+                "Total Speakers", 
+                speaker_analysis.get('total_speakers', 0)
+            )
+        
+        with col2:
+            gender_dist = speaker_analysis.get('gender_distribution', {})
+            male_count = gender_dist.get('male', 0)
+            female_count = gender_dist.get('female', 0)
+            st.metric("Male Speakers", male_count)
+        
+        with col3:
+            st.metric("Female Speakers", female_count)
+        
+        with col4:
+            confidence = speaker_analysis.get('diarization_confidence', 0)
+            st.metric("Confidence", f"{confidence:.2%}")
+        
+        # Speaker details
+        speakers = speaker_analysis.get('speakers', {})
+        if speakers:
+            st.subheader("🎯 Speaker Details")
+            
+            for speaker_id, speaker_data in speakers.items():
+                with st.expander(f"🎤 {speaker_id} ({speaker_data.get('gender', 'unknown').title()})"):
+                    col1, col2 = st.columns(2)
+                    
+                    with col1:
+                        st.metric("Total Duration", f"{speaker_data.get('total_duration', 0):.1f}s")
+                        st.metric("Segments", len(speaker_data.get('segments', [])))
+                        st.metric("Gender Confidence", f"{speaker_data.get('confidence', 0):.2%}")
+                    
+                    with col2:
+                        # Voice characteristics
+                        voice_chars = speaker_data.get('voice_characteristics', {})
+                        pitch_stats = voice_chars.get('pitch_statistics', {})
+                        
+                        if pitch_stats:
+                            st.metric("Mean Pitch", f"{pitch_stats.get('mean', 0):.1f} Hz")
+                            st.metric("Pitch Range", f"{pitch_stats.get('min', 0):.0f}-{pitch_stats.get('max', 0):.0f} Hz")
+                    
+                    # Show segments timeline
+                    segments = speaker_data.get('segments', [])
+                    if segments:
+                        st.write("**Speaking Segments:**")
+                        for i, segment in enumerate(segments[:5]):  # Show first 5 segments
+                            st.write(f"• {segment['start']:.1f}s - {segment['end']:.1f}s ({segment['duration']:.1f}s)")
+                        
+                        if len(segments) > 5:
+                            st.write(f"... and {len(segments) - 5} more segments")
+        
+        # Method and device info
+        st.info(f"Analysis method: {speaker_analysis.get('method', 'unknown')} on {speaker_analysis.get('device_used', 'unknown')}")
     
     async def _get_ai_response(self, state, prompt: str) -> str:
         """Get AI response based on context"""

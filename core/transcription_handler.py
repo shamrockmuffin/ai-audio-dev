@@ -3,6 +3,7 @@ import logging
 from pathlib import Path
 from services.whisper_service import WhisperService
 from services.claude_service import ClaudeService
+from services.pyannote_service import PyAnnoteService
 from config.settings import settings
 import asyncio
 
@@ -14,6 +15,10 @@ class TranscriptionHandler:
     def __init__(self):
         self.whisper_service = WhisperService()
         self.claude_service = ClaudeService()
+        self.pyannote_service = PyAnnoteService(
+            use_auth_token=settings.HUGGING_FACE_TOKEN,
+            use_gpu=settings.ENABLE_GPU
+        )
         
     async def transcribe(
         self,
@@ -77,47 +82,114 @@ class TranscriptionHandler:
         num_speakers: Optional[int] = None
     ) -> Dict:
         """
-        Transcribe with speaker diarization
+        Transcribe with speaker diarization using PyAnnote.audio
         
         Args:
             audio_path: Path to audio file
-            num_speakers: Optional number of speakers
+            num_speakers: Optional number of speakers (not used with PyAnnote)
             
         Returns:
             Dictionary with diarized transcription
         """
-        # This is a placeholder for speaker diarization
-        # In production, you would integrate a diarization model
-        
-        result = await self.transcribe(audio_path, enhance=True)
-        
-        # Simulated diarization result
-        result['speakers'] = self._simulate_diarization(
-            result['segments'], 
-            num_speakers
-        )
-        
-        return result
-    
-    def _simulate_diarization(
-        self, 
-        segments: List[Dict], 
-        num_speakers: Optional[int] = None
-    ) -> List[Dict]:
-        """Simulate speaker diarization (placeholder)"""
-        # In production, use pyannote or similar
-        speakers = []
-        current_speaker = 0
-        
-        for i, segment in enumerate(segments):
-            # Simple simulation: switch speakers every few segments
-            if i % 5 == 0 and i > 0:
-                current_speaker = (current_speaker + 1) % (num_speakers or 2)
+        try:
+            logger.info(f"Starting diarized transcription for: {audio_path}")
             
-            speakers.append({
-                'segment_id': i,
-                'speaker': f"Speaker {current_speaker + 1}",
-                'confidence': 0.85
-            })
+            # Get basic transcription
+            transcription_result = await self.transcribe(audio_path, enhance=True)
+            
+            # Get speaker diarization
+            speaker_analysis = await self.pyannote_service.analyze_speakers(audio_path)
+            
+            # Get voice activity detection
+            vad_analysis = await self.pyannote_service.analyze_voice_activity(audio_path)
+            
+            # Get overlap detection
+            overlap_analysis = await self.pyannote_service.detect_overlapped_speech(audio_path)
+            
+            # Combine results
+            result = {
+                **transcription_result,
+                'speaker_analysis': speaker_analysis,
+                'voice_activity': vad_analysis,
+                'overlap_analysis': overlap_analysis,
+                'diarized_segments': self._align_transcription_with_speakers(
+                    transcription_result.get('segments', []),
+                    speaker_analysis.get('speakers', {})
+                )
+            }
+            
+            logger.info("✓ Diarized transcription completed successfully")
+            return result
+            
+        except Exception as e:
+            logger.error(f"Diarized transcription error: {e}")
+            # Fallback to regular transcription
+            return await self.transcribe(audio_path, enhance=True)
+    
+    def _align_transcription_with_speakers(
+        self, 
+        transcription_segments: List[Dict],
+        speakers: Dict[str, Dict]
+    ) -> List[Dict]:
+        """
+        Align transcription segments with speaker segments
         
-        return speakers 
+        Args:
+            transcription_segments: Whisper transcription segments
+            speakers: PyAnnote speaker analysis results
+            
+        Returns:
+            List of aligned segments with speaker information
+        """
+        if not transcription_segments or not speakers:
+            return transcription_segments
+        
+        # Create a flat list of all speaker segments with speaker IDs
+        speaker_segments = []
+        for speaker_id, speaker_data in speakers.items():
+            for segment in speaker_data.get('segments', []):
+                speaker_segments.append({
+                    'start': segment['start'],
+                    'end': segment['end'],
+                    'speaker_id': speaker_id,
+                    'gender': speaker_data.get('gender', 'unknown'),
+                    'confidence': speaker_data.get('confidence', 0.0)
+                })
+        
+        # Sort by start time
+        speaker_segments.sort(key=lambda x: x['start'])
+        
+        # Align transcription segments with speaker segments
+        aligned_segments = []
+        
+        for trans_seg in transcription_segments:
+            trans_start = trans_seg.get('start', 0)
+            trans_end = trans_seg.get('end', trans_start + 1)
+            trans_mid = (trans_start + trans_end) / 2
+            
+            # Find the speaker segment that best overlaps with this transcription segment
+            best_speaker = None
+            best_overlap = 0
+            
+            for spk_seg in speaker_segments:
+                # Calculate overlap
+                overlap_start = max(trans_start, spk_seg['start'])
+                overlap_end = min(trans_end, spk_seg['end'])
+                overlap_duration = max(0, overlap_end - overlap_start)
+                
+                if overlap_duration > best_overlap:
+                    best_overlap = overlap_duration
+                    best_speaker = spk_seg
+            
+            # Create aligned segment
+            aligned_segment = {
+                **trans_seg,
+                'speaker_id': best_speaker['speaker_id'] if best_speaker else 'UNKNOWN',
+                'speaker_gender': best_speaker['gender'] if best_speaker else 'unknown',
+                'speaker_confidence': best_speaker['confidence'] if best_speaker else 0.0,
+                'overlap_duration': best_overlap
+            }
+            
+            aligned_segments.append(aligned_segment)
+        
+        return aligned_segments 
